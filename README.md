@@ -126,12 +126,13 @@ ResumeSender/
 - SMTP Configuration
 <img width="1919" height="905" alt="image" src="https://github.com/user-attachments/assets/8e421fa7-dd11-41b0-bae5-f8e2d0907590" />
 
-- Reciepents
+- Reciepents Lits
 <img width="1919" height="905" alt="image" src="https://github.com/user-attachments/assets/450d617f-4c9f-42e3-b182-3ebc10a8b01a" />
 
-- 
+- Reciepents Details Analysis
 <img width="1897" height="900" alt="image" src="https://github.com/user-attachments/assets/d2239791-f0b4-4df5-81d4-169da6b016fb" />
 
+and more.
 
 ## Security Notes
 
@@ -147,6 +148,7 @@ For issues or questions, please check the documentation or contact support.
 ## License
 
 Proprietary - All rights reserved by [Khoo Lay Yang](https://www.dkly.net)
+
 
 
 
