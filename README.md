@@ -130,4 +130,5 @@ For issues or questions, please check the documentation or contact support.
 
 ## License
 
-Proprietary - All rights reserved
+Proprietary - All rights reserved by [Khoo Lay Yang](https://www.dkly.net)
+
