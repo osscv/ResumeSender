@@ -1,17 +1,34 @@
 <?php
 require_once __DIR__ . '/config.php';
+require_once __DIR__ . '/utils/auth.php';
 
 function renderLayout($content, $title = 'Dashboard') {
     $currentPage = basename($_SERVER['PHP_SELF'], '.php');
     if ($currentPage == 'index') $currentPage = 'home';
     
+    // Detect if we're in an admin page
+    $isAdminPage = strpos($_SERVER['PHP_SELF'], '/admin/') !== false;
+    
     // Define menu items
-    $menuItems = [
-        'home' => ['icon' => 'fa-home', 'label' => 'Home', 'link' => BASE_URL . '/pages/home.php'],
-        'send' => ['icon' => 'fa-paper-plane', 'label' => 'Send', 'link' => BASE_URL . '/pages/send.php'],
-        'recipients' => ['icon' => 'fa-users', 'label' => 'Recipients', 'link' => BASE_URL . '/pages/recipients.php'],
-        'settings' => ['icon' => 'fa-cog', 'label' => 'Settings', 'link' => BASE_URL . '/pages/settings.php'],
-    ];
+    $menuItems = [];
+    
+    // For admins, show admin dashboard as Home
+    if (isAdmin()) {
+        $menuItems['dashboard'] = ['icon' => 'fa-home', 'label' => 'Dashboard', 'link' => BASE_URL . '/pages/admin/dashboard.php'];
+    } else {
+        $menuItems['home'] = ['icon' => 'fa-home', 'label' => 'Home', 'link' => BASE_URL . '/pages/home.php'];
+    }
+    
+    $menuItems['send'] = ['icon' => 'fa-paper-plane', 'label' => 'Send', 'link' => BASE_URL . '/pages/send.php'];
+    $menuItems['recipients'] = ['icon' => 'fa-users', 'label' => 'Recipients', 'link' => BASE_URL . '/pages/recipients.php'];
+    $menuItems['templates'] = ['icon' => 'fa-file-lines', 'label' => 'Templates', 'link' => BASE_URL . '/pages/templates.php'];
+    $menuItems['settings'] = ['icon' => 'fa-cog', 'label' => 'Settings', 'link' => BASE_URL . '/pages/settings.php'];
+    $menuItems['profile'] = ['icon' => 'fa-user', 'label' => 'Profile', 'link' => BASE_URL . '/pages/profile.php'];
+    
+    // Add admin menu items
+    if (isAdmin()) {
+        $menuItems['users'] = ['icon' => 'fa-user-shield', 'label' => 'User Management', 'link' => BASE_URL . '/pages/admin/users.php'];
+    }
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -69,16 +86,29 @@ function renderLayout($content, $title = 'Dashboard') {
             <?php endforeach; ?>
         </nav>
         
-        <div class="p-4 border-t border-gray-100">
+        <div class="p-4 border-t border-gray-100 space-y-2">
             <div class="flex items-center gap-3 px-4 py-2">
-                <div class="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-500">
+                <div class="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600">
                     <i class="fa-solid fa-user"></i>
                 </div>
-                <div class="text-sm">
-                    <p class="font-medium text-gray-700">User</p>
-                    <p class="text-xs text-gray-400">Admin</p>
+                <div class="text-sm flex-1 min-w-0">
+                    <p class="font-medium text-gray-700 truncate"><?php echo htmlspecialchars(getCurrentUserName()); ?></p>
+                    <?php if (!empty($_SESSION['name'])): ?>
+                        <p class="text-xs text-gray-400 truncate">@<?php echo htmlspecialchars(getUsername()); ?></p>
+                    <?php endif; ?>
+                </div>
+                <div>
+                    <?php if (isAdmin()): ?>
+                        <span class="bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded text-xs font-medium">Admin</span>
+                    <?php else: ?>
+                        <span class="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded text-xs">User</span>
+                    <?php endif; ?>
                 </div>
             </div>
+            <a href="<?php echo BASE_URL; ?>/pages/logout.php" class="flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors">
+                <i class="fa-solid fa-sign-out-alt"></i>
+                <span>Logout</span>
+            </a>
         </div>
     </aside>
 
