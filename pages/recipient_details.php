@@ -1,6 +1,9 @@
 <?php
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../layout.php';
+require_once __DIR__ . '/../utils/auth.php';
+
+requireAuth();
 
 $pdo = getDBConnection();
 

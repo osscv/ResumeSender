@@ -1,6 +1,15 @@
 <?php
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../layout.php';
+require_once __DIR__ . '/../utils/auth.php';
+
+requireAuth();
+
+// Redirect admins to admin dashboard
+if (isAdmin()) {
+    header('Location: ' . BASE_URL . '/pages/admin/dashboard.php');
+    exit;
+}
 
 $pdo = getDBConnection();
 
@@ -13,11 +22,12 @@ $stats = [
 ];
 
 // Total Recipients
-$stmt = $pdo->query("SELECT COUNT(*) FROM recipients");
+$userFilter = getUserFilter();
+$stmt = $pdo->query("SELECT COUNT(*) FROM recipients WHERE 1=1 $userFilter");
 $stats['recipients'] = $stmt->fetchColumn();
 
 // Email Logs Stats
-$stmt = $pdo->query("SELECT COUNT(*) as total, SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success, SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed FROM email_logs");
+$stmt = $pdo->query("SELECT COUNT(*) as total, SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success, SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed FROM email_logs l JOIN recipients r ON l.recipient_id = r.id WHERE 1=1 $userFilter");
 $row = $stmt->fetch();
 $stats['sent_total'] = $row['total'] ?? 0;
 $stats['sent_success'] = $row['success'] ?? 0;
@@ -28,6 +38,7 @@ $stmt = $pdo->query("
     SELECT l.*, r.email as recipient_email, r.company_name 
     FROM email_logs l 
     JOIN recipients r ON l.recipient_id = r.id 
+    WHERE 1=1 $userFilter
     ORDER BY l.sent_at DESC 
     LIMIT 10
 ");

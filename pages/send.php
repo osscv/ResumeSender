@@ -2,6 +2,9 @@
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../layout.php';
 require_once __DIR__ . '/../utils/email_sender.php';
+require_once __DIR__ . '/../utils/auth.php';
+
+requireAuth();
 
 $pdo = getDBConnection();
 $message = '';
@@ -21,14 +24,63 @@ $stmt = $pdo->query("
 $smtpConfigs = $stmt->fetchAll();
 
 // Fetch Recipients for Selection List
+$userFilter = getUserFilter('r');
 $stmt = $pdo->query("
     SELECT r.*, MAX(l.sent_at) as last_sent 
     FROM recipients r 
     LEFT JOIN email_logs l ON r.id = l.recipient_id 
+    WHERE 1=1 $userFilter
     GROUP BY r.id 
     ORDER BY r.company_name ASC
 ");
 $recipientList = $stmt->fetchAll();
+
+// Fetch Templates
+$stmt = $pdo->prepare("SELECT * FROM email_templates WHERE user_id = ? ORDER BY name ASC");
+$stmt->execute([getCurrentUserId()]);
+$templates = $stmt->fetchAll();
+
+// Handle AJAX Requests
+if (isset($_GET['action']) && $_GET['action'] === 'get_recipients') {
+    header('Content-Type: application/json');
+    try {
+        $targetAudience = $_GET['target_audience'] ?? '';
+        $recipientsToSend = [];
+
+        // Fetch all recipients with last_sent info for filtering
+        $stmt = $pdo->query("
+            SELECT r.id, MAX(l.sent_at) as last_sent 
+            FROM recipients r 
+            LEFT JOIN email_logs l ON r.id = l.recipient_id 
+            WHERE 1=1 $userFilter
+            GROUP BY r.id
+        ");
+        $allRecipients = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        if ($targetAudience === 'all') {
+            $recipientsToSend = array_column($allRecipients, 'id');
+        } elseif ($targetAudience === 'new') {
+            foreach ($allRecipients as $r) {
+                if (empty($r['last_sent'])) {
+                    $recipientsToSend[] = $r['id'];
+                }
+            }
+        } elseif ($targetAudience === 'followup') {
+            foreach ($allRecipients as $r) {
+                if (!empty($r['last_sent'])) {
+                    $recipientsToSend[] = $r['id'];
+                }
+            }
+        }
+        
+        echo json_encode(['success' => true, 'ids' => $recipientsToSend]);
+        exit;
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        exit;
+    }
+}
 
 // Handle Form Submission
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -208,34 +260,67 @@ ob_start();
                 <div id="specific_recipients_container" class="hidden">
                     <label class="block text-sm font-medium text-gray-700 mb-1">Select Recipients</label>
                     <div class="border border-gray-300 rounded-lg overflow-hidden">
-                        <div class="bg-gray-50 px-3 py-2 border-b border-gray-200 flex justify-between items-center">
-                            <span class="text-xs text-gray-500">Select individuals to email</span>
-                            <div class="space-x-2">
-                                <button type="button" onclick="selectAllRecipients(true)" class="text-xs text-blue-600 hover:text-blue-800">Select All</button>
-                                <button type="button" onclick="selectAllRecipients(false)" class="text-xs text-gray-500 hover:text-gray-700">Deselect All</button>
+                        <div class="bg-gray-50 px-3 py-2 border-b border-gray-200 flex flex-col gap-2">
+                            <div class="flex justify-between items-center flex-wrap gap-2">
+                                <span class="text-xs text-gray-500">Select individuals to email</span>
+                                <div class="flex flex-wrap gap-2">
+                                    <button type="button" onclick="selectNewRecipients(50)" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200 transition-colors">Select 50 New</button>
+                                    <button type="button" onclick="selectNewRecipients(100)" class="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded hover:bg-blue-200 transition-colors">Select 100 New</button>
+                                    <div class="w-px h-4 bg-gray-300 mx-1"></div>
+                                    <button type="button" onclick="selectAllRecipients(true)" class="text-xs text-blue-600 hover:text-blue-800">Select All</button>
+                                    <button type="button" onclick="selectAllRecipients(false)" class="text-xs text-gray-500 hover:text-gray-700">Deselect All</button>
+                                </div>
+                            </div>
+                            <input type="text" 
+                                   id="recipientSearch" 
+                                   onkeyup="filterRecipients()" 
+                                   placeholder="Search by name, email, or position..." 
+                                   class="w-full text-xs border border-gray-300 rounded px-2 py-1.5 focus:ring-1 focus:ring-blue-500 focus:border-blue-500 outline-none">
+                            <div class="mt-1 flex gap-3 text-xs text-gray-600 font-medium">
+                                <span>Selected: <span id="countSelected" class="text-blue-600">0</span></span>
+                                <span class="text-gray-400">|</span>
+                                <span>New: <span id="countNew" class="text-green-600">0</span></span>
+                                <span class="text-gray-400">|</span>
+                                <span>Follow-up: <span id="countFollowup" class="text-orange-600">0</span></span>
                             </div>
                         </div>
-                        <div class="max-h-48 overflow-y-auto p-2 space-y-1">
+                        <div class="max-h-64 overflow-y-auto p-2 space-y-1" id="recipientList">
                             <?php foreach ($recipientList as $recipient): ?>
-                            <label class="flex items-center p-2 hover:bg-gray-50 rounded cursor-pointer">
-                                <input type="checkbox" name="recipient_ids[]" value="<?php echo $recipient['id']; ?>" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 mr-3">
+                            <label class="recipient-item flex items-center p-2 hover:bg-gray-50 rounded cursor-pointer transition-colors duration-150">
+                                <input type="checkbox" name="recipient_ids[]" value="<?php echo $recipient['id']; ?>" data-is-new="<?php echo empty($recipient['last_sent']) ? '1' : '0'; ?>" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500 mr-3">
                                 <div class="flex-1 min-w-0">
                                     <div class="flex justify-between">
-                                        <p class="text-sm font-medium text-gray-900 truncate"><?php echo htmlspecialchars($recipient['company_name']); ?></p>
+                                        <p class="text-sm font-medium text-gray-900 truncate search-target"><?php echo htmlspecialchars($recipient['company_name']); ?></p>
                                         <?php if ($recipient['last_sent']): ?>
                                             <span class="text-xs text-green-600 bg-green-50 px-1.5 rounded">Sent: <?php echo date('M j', strtotime($recipient['last_sent'])); ?></span>
                                         <?php else: ?>
                                             <span class="text-xs text-gray-400 bg-gray-100 px-1.5 rounded">New</span>
                                         <?php endif; ?>
                                     </div>
-                                    <p class="text-xs text-gray-500 truncate"><?php echo htmlspecialchars($recipient['email']); ?> • <?php echo htmlspecialchars($recipient['position']); ?></p>
+                                    <p class="text-xs text-gray-500 truncate search-target"><?php echo htmlspecialchars($recipient['email']); ?> • <?php echo htmlspecialchars($recipient['position']); ?></p>
                                 </div>
                             </label>
                             <?php endforeach; ?>
+                            <div id="noRecipientsFound" class="hidden p-4 text-center text-sm text-gray-500">
+                                No recipients found matching your search.
+                            </div>
                         </div>
                     </div>
                 </div>
                 
+                <!-- Template Selection -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Load Template (Optional)</label>
+                    <select id="template_select" onchange="loadTemplate(this.value)" class="w-full rounded-lg border-gray-300 border px-3 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all bg-white">
+                        <option value="">-- Select a Template --</option>
+                        <?php foreach ($templates as $template): ?>
+                            <option value="<?php echo $template['id']; ?>">
+                                <?php echo htmlspecialchars($template['name']); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </div>
+
                 <!-- Subject -->
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Subject</label>
@@ -316,7 +401,7 @@ ob_start();
                         <i class="fa-solid fa-vial mr-2"></i> Send Test Email
                     </button>
                     
-                    <button type="submit" name="action" value="send_batch" onclick="return confirmSend()" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg shadow-sm transition-colors font-medium flex items-center gap-2">
+                    <button type="button" onclick="startBatchSend()" class="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2 rounded-lg shadow-sm transition-colors font-medium flex items-center gap-2">
                         <i class="fa-solid fa-paper-plane"></i> <span id="sendButtonText">Send Emails</span>
                     </button>
                 </div>
@@ -351,6 +436,51 @@ ob_start();
                         <span class="text-gray-500">Recipient's Email</span>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Send Progress Modal -->
+<div id="progressModal" class="fixed inset-0 bg-gray-900/50 hidden z-50 flex items-center justify-center backdrop-blur-sm" data-backdrop="static">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg m-4 overflow-hidden">
+        <div class="p-6 border-b border-gray-100">
+            <h3 class="text-xl font-bold text-gray-800">Sending Emails</h3>
+            <p class="text-sm text-gray-500 mt-1" id="progressStatus">Initializing...</p>
+        </div>
+        
+        <div class="p-6 space-y-4">
+            <!-- Progress Bar -->
+            <div class="w-full bg-gray-100 rounded-full h-4 overflow-hidden">
+                <div id="progressBar" class="bg-blue-500 h-4 rounded-full transition-all duration-300" style="width: 0%"></div>
+            </div>
+            
+            <div class="flex justify-between text-sm text-gray-600">
+                <span id="progressCount">0 / 0</span>
+                <span id="progressPercent">0%</span>
+            </div>
+            
+            <!-- Log Area -->
+            <div class="bg-gray-50 rounded-lg p-3 h-48 overflow-y-auto font-mono text-xs text-gray-600 border border-gray-200" id="progressLog">
+                <!-- Logs will appear here -->
+            </div>
+            
+            <!-- Stats -->
+            <div class="grid grid-cols-2 gap-4 mt-4 hidden" id="completionStats">
+                <div class="bg-green-50 p-3 rounded-lg border border-green-100 text-center">
+                    <span class="block text-xl font-bold text-green-600" id="successCount">0</span>
+                    <span class="text-xs text-green-700">Successful</span>
+                </div>
+                <div class="bg-red-50 p-3 rounded-lg border border-red-100 text-center">
+                    <span class="block text-xl font-bold text-red-600" id="failCount">0</span>
+                    <span class="text-xs text-red-700">Failed</span>
+                </div>
+            </div>
+
+            <div class="pt-2 flex justify-end">
+                <button type="button" id="closeProgressBtn" onclick="location.reload()" class="bg-gray-800 hover:bg-gray-900 text-white px-6 py-2 rounded-lg shadow-sm transition-colors font-medium hidden">
+                    Close & Refresh
+                </button>
             </div>
         </div>
     </div>
@@ -404,32 +534,257 @@ function toggleRecipientSelection() {
     }
 }
 
-function confirmSend() {
+async function startBatchSend() {
+    // 1. Validation and Confirmation
     const audience = document.getElementById('target_audience').value;
-    let msg = 'Are you sure you want to send this email?';
+    const smtpId = document.querySelector('select[name="smtp_config_id"]').value;
+    const subject = document.querySelector('input[name="subject"]').value;
+    // Sync editor to body input first
+    document.getElementById('bodyInput').value = document.getElementById('editor').innerHTML;
+    const body = document.getElementById('bodyInput').value;
+    const attachments = document.getElementById('attachments').files;
+
+    if (!smtpId) return alert('Please select an SMTP server.');
+    if (!subject) return alert('Please enter a subject.');
+    if (!body) return alert('Please enter email body.');
     
-    if (audience === 'all') {
-        msg = 'Are you sure you want to send this email to ALL recipients?';
-    } else if (audience === 'new') {
-        msg = 'Are you sure you want to send this email to NEW candidates only?';
-    } else if (audience === 'followup') {
-        msg = 'Are you sure you want to send this email to previously contacted candidates only?';
-    } else if (audience === 'specific') {
-        const count = document.querySelectorAll('input[name="recipient_ids[]"]:checked').length;
-        if (count === 0) {
-            alert('Please select at least one recipient.');
-            return false;
+    // 2. Identify Recipients
+    let recipientIds = [];
+    
+    if (audience === 'specific') {
+        const checkboxes = document.querySelectorAll('input[name="recipient_ids[]"]:checked');
+        checkboxes.forEach(cb => recipientIds.push(cb.value));
+        if (recipientIds.length === 0) return alert('Please select at least one recipient.');
+    } else {
+        // Fetch IDs via AJAX for "All", "New", "Follow-up"
+        try {
+            const response = await fetch(`?action=get_recipients&target_audience=${audience}`);
+            const data = await response.json();
+            if (data.success) {
+                recipientIds = data.ids;
+            } else {
+                return alert('Failed to fetch recipient groups: ' + (data.error || 'Unknown error'));
+            }
+        } catch (e) {
+            return alert('Error fetching recipients: ' + e.message);
         }
-        msg = `Are you sure you want to send this email to the ${count} selected recipients?`;
     }
     
-    return confirm(msg);
+    if (recipientIds.length === 0) return alert('No recipients found for the selected group.');
+    
+    if (!confirm(`Are you sure you want to send this email to ${recipientIds.length} recipients?`)) return;
+
+    // 3. Setup UI
+    const modal = document.getElementById('progressModal');
+    const progressBar = document.getElementById('progressBar');
+    const progressStatus = document.getElementById('progressStatus');
+    const progressCount = document.getElementById('progressCount');
+    const progressPercent = document.getElementById('progressPercent');
+    const log = document.getElementById('progressLog');
+    
+    modal.classList.remove('hidden');
+    
+    let processed = 0;
+    let success = 0;
+    let failed = 0;
+    const total = recipientIds.length;
+
+    // Tunables — chunked + parallel keeps wall-clock low without blowing past
+    // PHP max_execution_time or hammering one SMTP server with too many sockets.
+    const CHUNK_SIZE = 10;
+    const CONCURRENCY = 3;
+
+    const appendLog = (cls, text) => {
+        const line = document.createElement('div');
+        line.className = 'mb-1 ' + cls;
+        line.textContent = text;
+        log.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+    };
+
+    const refreshProgress = () => {
+        const pct = total === 0 ? 0 : Math.round((processed / total) * 100);
+        progressBar.style.width = pct + '%';
+        progressCount.textContent = `${processed} / ${total}`;
+        progressPercent.textContent = pct + '%';
+        progressStatus.textContent = `Sending... ${processed} / ${total}`;
+    };
+
+    // 4. Upload attachments ONCE (instead of re-uploading per recipient)
+    let attachmentRefs = [];
+    if (attachments.length > 0) {
+        progressStatus.textContent = 'Uploading attachments...';
+        const upFd = new FormData();
+        for (let j = 0; j < attachments.length; j++) {
+            upFd.append('attachments[]', attachments[j]);
+        }
+        try {
+            const upRes = await fetch('../api/upload_attachments_api.php', { method: 'POST', body: upFd });
+            const upData = await upRes.json();
+            if (!upData.success) {
+                appendLog('text-red-600', '[ERR] Attachment upload failed: ' + (upData.message || 'unknown'));
+                progressStatus.textContent = 'Attachment upload failed';
+                document.getElementById('closeProgressBtn').classList.remove('hidden');
+                return;
+            }
+            attachmentRefs = upData.attachments || [];
+            appendLog('text-gray-600', `[INFO] Uploaded ${attachmentRefs.length} attachment(s) once for the whole batch.`);
+        } catch (err) {
+            appendLog('text-red-600', '[ERR] Upload network error: ' + err.message);
+            progressStatus.textContent = 'Attachment upload failed';
+            document.getElementById('closeProgressBtn').classList.remove('hidden');
+            return;
+        }
+    }
+
+    // 5. Build chunks and run in parallel via a small promise pool
+    const chunks = [];
+    for (let i = 0; i < recipientIds.length; i += CHUNK_SIZE) {
+        chunks.push(recipientIds.slice(i, i + CHUNK_SIZE));
+    }
+    let nextChunk = 0;
+
+    async function worker() {
+        while (true) {
+            const idx = nextChunk++;
+            if (idx >= chunks.length) return;
+            const chunk = chunks[idx];
+
+            const fd = new FormData();
+            chunk.forEach(id => fd.append('recipient_ids[]', id));
+            fd.append('smtp_config_id', smtpId);
+            fd.append('subject', subject);
+            fd.append('body', body);
+            attachmentRefs.forEach(a => {
+                fd.append('attachment_tokens[]', a.token);
+                fd.append('attachment_names[]', a.name);
+            });
+
+            try {
+                const res = await fetch('../api/send_batch_api.php', { method: 'POST', body: fd });
+                let data;
+                try {
+                    data = await res.json();
+                } catch (parseErr) {
+                    data = { success: false, message: 'Invalid response (Status: ' + res.status + ')' };
+                }
+
+                if (data.success && Array.isArray(data.results)) {
+                    data.results.forEach(r => {
+                        appendLog(r.success ? 'text-green-600' : 'text-red-600',
+                                  (r.success ? '[OK] ' : '[ERR] ') + `ID: ${r.recipient_id} - ` + (r.message || ''));
+                        if (r.success) success++; else failed++;
+                        processed++;
+                    });
+                } else {
+                    chunk.forEach(id => {
+                        appendLog('text-red-600', `[ERR] ID: ${id} - Batch error: ` + (data.message || 'unknown'));
+                        failed++; processed++;
+                    });
+                }
+            } catch (err) {
+                chunk.forEach(id => {
+                    appendLog('text-red-600', `[ERR] ID: ${id} - Network error: ${err.message}`);
+                    failed++; processed++;
+                });
+            }
+            refreshProgress();
+        }
+    }
+
+    refreshProgress();
+    const workers = [];
+    for (let w = 0; w < Math.min(CONCURRENCY, chunks.length); w++) {
+        workers.push(worker());
+    }
+    await Promise.all(workers);
+
+    // 6. Done
+    progressStatus.textContent = 'Completed!';
+    document.getElementById('completionStats').classList.remove('hidden');
+    document.getElementById('successCount').textContent = success;
+    document.getElementById('failCount').textContent = failed;
+    document.getElementById('closeProgressBtn').classList.remove('hidden');
 }
 
 function selectAllRecipients(select) {
-    const checkboxes = document.querySelectorAll('input[name="recipient_ids[]"]');
+    const checkboxes = document.querySelectorAll('.recipient-item:not(.hidden) input[name="recipient_ids[]"]');
     checkboxes.forEach(cb => cb.checked = select);
+    updateSelectionStats();
 }
+
+function filterRecipients() {
+    const input = document.getElementById('recipientSearch');
+    const filter = input.value.toLowerCase();
+    const list = document.getElementById('recipientList');
+    const items = list.getElementsByClassName('recipient-item');
+    const noResult = document.getElementById('noRecipientsFound');
+    let hasVisible = false;
+
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        // We look for text within search-target classes (company, email, position)
+        // Actually, just checking the entire item's text content is easier and covers everything.
+        const text = item.textContent || item.innerText;
+        
+        if (text.toLowerCase().indexOf(filter) > -1) {
+            item.classList.remove('hidden');
+            hasVisible = true;
+        } else {
+            item.classList.add('hidden');
+        }
+    }
+    
+    // Show/hide no result message
+    if (!hasVisible && items.length > 0) {
+        noResult.classList.remove('hidden');
+    } else {
+        noResult.classList.add('hidden');
+    }
+}
+
+function selectNewRecipients(limit) {
+    // First deselect all visible
+    selectAllRecipients(false);
+    
+    // Find all visible checkboxes that are marked as new
+    const checkboxes = document.querySelectorAll('.recipient-item:not(.hidden) input[data-is-new="1"]');
+    
+    let count = 0;
+    for (let i = 0; i < checkboxes.length; i++) {
+        if (count >= limit) break;
+        checkboxes[i].checked = true;
+        count++;
+    }
+    updateSelectionStats();
+}
+
+function updateSelectionStats() {
+    const checkboxes = document.querySelectorAll('input[name="recipient_ids[]"]:checked');
+    let selected = 0;
+    let isNew = 0;
+    let followup = 0;
+    
+    checkboxes.forEach(cb => {
+        selected++;
+        if (cb.getAttribute('data-is-new') === '1') {
+            isNew++;
+        } else {
+            followup++;
+        }
+    });
+    
+    document.getElementById('countSelected').textContent = selected;
+    document.getElementById('countNew').textContent = isNew;
+    document.getElementById('countFollowup').textContent = followup;
+}
+
+// Add event listeners for checkboxes
+document.addEventListener('change', function(e) {
+    if (e.target && e.target.name === 'recipient_ids[]') {
+        updateSelectionStats();
+    }
+});
 
 function formatDoc(cmd, value = null) {
     if (value) {
@@ -503,6 +858,23 @@ window.onload = function() {
         document.getElementById('editor').innerHTML = existingBody;
     }
 };
+
+// Template Loading
+const templates = <?php echo json_encode($templates); ?>;
+
+function loadTemplate(templateId) {
+    if (!templateId) return;
+    
+    const template = templates.find(t => t.id == templateId);
+    if (template) {
+        if (confirm('This will overwrite the current subject and body. Continue?')) {
+            document.querySelector('input[name="subject"]').value = template.subject;
+            document.getElementById('editor').innerHTML = template.body;
+        } else {
+            document.getElementById('template_select').value = "";
+        }
+    }
+}
 </script>
 
 <?php

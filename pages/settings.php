@@ -1,6 +1,9 @@
 <?php
 require_once __DIR__ . '/../config.php';
 require_once __DIR__ . '/../layout.php';
+require_once __DIR__ . '/../utils/auth.php';
+
+requireAuth();
 
 $pdo = getDBConnection();
 $message = '';
@@ -11,8 +14,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (isset($_POST['action'])) {
         if ($_POST['action'] === 'add_smtp') {
             try {
-                $stmt = $pdo->prepare("INSERT INTO smtp_configurations (server_name, provider, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, from_email, from_name, daily_quota) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                $stmt = $pdo->prepare("INSERT INTO smtp_configurations (user_id, server_name, provider, smtp_host, smtp_port, smtp_username, smtp_password, smtp_encryption, from_email, from_name, daily_quota) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
                 $stmt->execute([
+                    getCurrentUserId(),
                     $_POST['server_name'],
                     $_POST['provider'],
                     $_POST['smtp_host'],
@@ -54,8 +58,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         } elseif ($_POST['action'] === 'delete_smtp') {
             try {
-                $stmt = $pdo->prepare("DELETE FROM smtp_configurations WHERE id = ?");
-                $stmt->execute([$_POST['id']]);
+                $stmt = $pdo->prepare("DELETE FROM smtp_configurations WHERE id = ? AND user_id = ?");
+                $stmt->execute([$_POST['id'], getCurrentUserId()]);
                 $message = "SMTP Configuration deleted successfully!";
                 $messageType = "success";
             } catch (PDOException $e) {
@@ -66,14 +70,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
+// Handle user filter for admins
+$selectedUserId = $_GET['filter_user'] ?? '';
+$userFilterExtra = '';
+if (isAdmin() && !empty($selectedUserId)) {
+    $userFilterExtra = " AND s.user_id = " . intval($selectedUserId);
+}
+
+// Handle search
+$searchQuery = $_GET['search'] ?? '';
+$searchFilter = '';
+if (!empty($searchQuery)) {
+    $searchTerm = '%' . $searchQuery . '%';
+    $searchFilter = " AND (s.server_name LIKE " . $pdo->quote($searchTerm) . 
+                   " OR s.smtp_host LIKE " . $pdo->quote($searchTerm) . 
+                   " OR s.from_email LIKE " . $pdo->quote($searchTerm) . 
+                   " OR s.provider LIKE " . $pdo->quote($searchTerm) . ")";
+}
+
+// Fetch all users for filter dropdown (admin only)
+$users = [];
+if (isAdmin()) {
+    $stmt = $pdo->query("SELECT id, username FROM users ORDER BY username ASC");
+    $users = $stmt->fetchAll();
+}
+
 // Fetch SMTP Configurations with usage stats
+$userFilter = getUserFilter('s');
 $stmt = $pdo->query("
     SELECT s.*, 
+    u.username as owner_username,
     (SELECT COUNT(*) FROM email_logs l 
      WHERE l.smtp_config_id = s.id 
      AND DATE(l.sent_at) = CURDATE() 
      AND l.status = 'success') as used_today
     FROM smtp_configurations s 
+    LEFT JOIN users u ON s.user_id = u.id
+    WHERE 1=1 $userFilter $userFilterExtra $searchFilter
     ORDER BY s.created_at DESC
 ");
 $smtpConfigs = $stmt->fetchAll();
@@ -88,9 +121,35 @@ ob_start();
             <h3 class="text-2xl font-bold text-gray-800">SMTP Configurations</h3>
             <p class="text-gray-500 mt-1">Manage your email server settings.</p>
         </div>
-        <button onclick="openAddSmtp()" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg shadow-sm transition-colors flex items-center gap-2">
-            <i class="fa-solid fa-plus"></i> Add New SMTP
-        </button>
+        <div class="flex items-center gap-3">
+            <?php if (isAdmin() && !empty($users)): ?>
+            <form method="GET" class="flex items-center gap-2">
+                <?php if (!empty($searchQuery)): ?>
+                <input type="hidden" name="search" value="<?php echo htmlspecialchars($searchQuery); ?>">
+                <?php endif; ?>
+                <select name="filter_user" onchange="this.form.submit()" class="rounded-lg border-gray-300 border px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+                    <option value="">All Users</option>
+                    <?php foreach ($users as $user): ?>
+                        <option value="<?php echo $user['id']; ?>" <?php echo $selectedUserId == $user['id'] ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($user['username']); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </form>
+            <?php endif; ?>
+            <form method="GET" class="flex-1 max-w-md">
+                <?php if (!empty($selectedUserId)): ?>
+                <input type="hidden" name="filter_user" value="<?php echo htmlspecialchars($selectedUserId); ?>">
+                <?php endif; ?>
+                <div class="relative">
+                    <input type="text" name="search" value="<?php echo htmlspecialchars($searchQuery); ?>" placeholder="Search by server name, host, or email..." class="w-full rounded-lg border-gray-300 border px-4 py-2 pl-10 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none">
+                    <i class="fa-solid fa-search absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"></i>
+                </div>
+            </form>
+            <button onclick="openAddSmtp()" class="bg-blue-500 hover:bg-blue-600 text-white px-4 py-2 rounded-lg shadow-sm transition-colors flex items-center gap-2">
+                <i class="fa-solid fa-plus"></i> Add New SMTP
+            </button>
+        </div>
     </div>
 
     <!-- Alert Message -->
@@ -117,6 +176,9 @@ ob_start();
                         <tr>
                             <th class="px-6 py-4">Provider</th>
                             <th class="px-6 py-4">Server Name</th>
+                            <?php if (isAdmin()): ?>
+                            <th class="px-6 py-4">Owner</th>
+                            <?php endif; ?>
                             <th class="px-6 py-4">Host</th>
                             <th class="px-6 py-4">Port</th>
                             <th class="px-6 py-4">From Email</th>
@@ -159,6 +221,14 @@ ob_start();
                                 </div>
                             </td>
                             <td class="px-6 py-4 font-medium text-gray-900"><?php echo htmlspecialchars($config['server_name']); ?></td>
+                            <?php if (isAdmin()): ?>
+                            <td class="px-6 py-4">
+                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+                                    <i class="fa-solid fa-user mr-1"></i>
+                                    <?php echo htmlspecialchars($config['owner_username'] ?? 'Unknown'); ?>
+                                </span>
+                            </td>
+                            <?php endif; ?>
                             <td class="px-6 py-4"><?php echo htmlspecialchars($config['smtp_host']); ?></td>
                             <td class="px-6 py-4"><?php echo htmlspecialchars($config['smtp_port']); ?></td>
                             <td class="px-6 py-4"><?php echo htmlspecialchars($config['from_email']); ?></td>

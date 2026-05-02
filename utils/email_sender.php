@@ -26,89 +26,135 @@ class SMTPMailer {
     
     public function sendEmail($to, $subject, $body, $attachments = []) {
         try {
-            // Connect to SMTP server
-            if (!$this->connect()) {
+            if (!$this->open()) {
                 return false;
             }
-            
-            // Generate a unique boundary
-            $boundary = md5(uniqid(time()));
-
-            // Send MAIL FROM
-            $this->sendCommand("MAIL FROM: <{$this->from_email}>", 250);
-            
-            // Send RCPT TO
-            $this->sendCommand("RCPT TO: <{$to}>", 250);
-            
-            // Send DATA
-            $this->sendCommand("DATA", 354);
-            
-            // Build email headers
-            $headers = $this->buildHeaders($to, $subject, $attachments, $boundary);
-            
-            // Build email body
-            $message = $this->buildMessage($body, $attachments, $boundary);
-            
-            // Send the complete email
-            $email = $headers . "\r\n" . $message . "\r\n.";
-            fputs($this->socket, $email . "\r\n");
-            $this->getResponse(250);
-            
-            // Close connection
-            $this->sendCommand("QUIT", 221);
-            fclose($this->socket);
-            
+            $this->sendOne($to, $subject, $body, $attachments);
+            $this->close();
             return true;
-            
         } catch (Exception $e) {
             $this->error = $e->getMessage();
-            if ($this->socket) {
-                fclose($this->socket);
-            }
+            $this->forceCloseSocket();
             return false;
         }
     }
-    
+
+    /**
+     * Open SMTP connection (for reuse across multiple sendOne calls).
+     */
+    public function open() {
+        return $this->connect();
+    }
+
+    /**
+     * Send a single message over an already-open connection.
+     * Throws on error so callers can decide whether to continue or reopen.
+     * The optional $encodedAttachments array lets callers reuse pre-encoded
+     * attachment bodies across many recipients (avoids re-reading/encoding files).
+     */
+    public function sendOne($to, $subject, $body, $attachments = [], $encodedAttachments = null) {
+        if (!$this->socket) {
+            throw new Exception("SMTP connection not open");
+        }
+        $boundary = md5(uniqid((string)mt_rand(), true));
+
+        $this->sendCommand("MAIL FROM: <{$this->from_email}>", 250);
+        $this->sendCommand("RCPT TO: <{$to}>", 250);
+        $this->sendCommand("DATA", 354);
+
+        $headers = $this->buildHeaders($to, $subject, $attachments, $boundary);
+        $message = $this->buildMessage($body, $attachments, $boundary, $encodedAttachments);
+
+        $email = $headers . "\r\n" . $message . "\r\n.";
+        fputs($this->socket, $email . "\r\n");
+        $this->getResponse(250);
+    }
+
+    /**
+     * Gracefully close the SMTP connection.
+     */
+    public function close() {
+        if (!$this->socket) return;
+        try {
+            $this->sendCommand("QUIT", 221);
+        } catch (Exception $e) {
+            // ignore — we're closing anyway
+        }
+        $this->forceCloseSocket();
+    }
+
+    private function forceCloseSocket() {
+        if ($this->socket) {
+            @fclose($this->socket);
+            $this->socket = null;
+        }
+    }
+
     private function connect() {
         $errno = 0;
         $errstr = '';
-        
+
         // Determine connection type
         if ($this->smtp_encryption == 'ssl') {
             $host = 'ssl://' . $this->smtp_host;
         } else {
             $host = $this->smtp_host;
         }
-        
+
         // Open socket connection
         $this->socket = @fsockopen($host, $this->smtp_port, $errno, $errstr, 30);
-        
+
         if (!$this->socket) {
             throw new Exception("Failed to connect: $errstr ($errno)");
         }
-        
+
         // Get server response
         $this->getResponse(220);
-        
+
+        // EHLO must identify the *client*, not the server. Outlook/Office 365
+        // rejects EHLO arguments that look like the server's own hostname or
+        // are otherwise unparseable, so use the local hostname (FQDN if we
+        // have one), and fall back to the from-domain or a sane literal.
+        $clientHost = $this->getClientHostname();
+
         // Send EHLO
-        $this->sendCommand("EHLO " . $this->smtp_host, 250);
-        
+        $this->sendCommand("EHLO " . $clientHost, 250);
+
         // Start TLS if required
         if ($this->smtp_encryption == 'tls') {
             $this->sendCommand("STARTTLS", 220);
-            if (!stream_socket_enable_crypto($this->socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
-                throw new Exception("Failed to enable TLS encryption");
+            // Microsoft 365 / Outlook deprecated TLS 1.0 and 1.1. PHP's
+            // STREAM_CRYPTO_METHOD_TLS_CLIENT constant is bound to TLS 1.0 on
+            // many builds, so request TLS 1.2/1.3 explicitly.
+            $crypto = STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT;
+            if (defined('STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT')) {
+                $crypto |= STREAM_CRYPTO_METHOD_TLSv1_3_CLIENT;
+            }
+            if (!stream_socket_enable_crypto($this->socket, true, $crypto)) {
+                throw new Exception("Failed to enable TLS encryption (server may require TLS 1.2+)");
             }
             // Send EHLO again after STARTTLS
-            $this->sendCommand("EHLO " . $this->smtp_host, 250);
+            $this->sendCommand("EHLO " . $clientHost, 250);
         }
-        
+
         // Authenticate
         $this->sendCommand("AUTH LOGIN", 334);
         $this->sendCommand(base64_encode($this->smtp_username), 334);
         $this->sendCommand(base64_encode($this->smtp_password), 235);
-        
+
         return true;
+    }
+
+    private function getClientHostname() {
+        $host = function_exists('gethostname') ? gethostname() : '';
+        if ($host && strpos($host, '.') !== false) {
+            return $host;
+        }
+        // Prefer the from-address domain — gives a meaningful, parseable EHLO.
+        if (!empty($this->from_email) && strpos($this->from_email, '@') !== false) {
+            return substr(strrchr($this->from_email, '@'), 1);
+        }
+        return $host ?: 'localhost.localdomain';
     }
     
     private function sendCommand($command, $expectedCode) {
@@ -117,19 +163,37 @@ class SMTPMailer {
     }
     
     private function getResponse($expectedCode) {
+        // SMTP multi-line responses repeat the code on every line, with `-`
+        // after the code on continuation lines and ` ` after the code on the
+        // final line. Track that explicitly per-line, because long EHLO lines
+        // (Outlook lists many extensions) can exceed any single fgets read and
+        // the previous "look at byte 3 of whatever fgets returned" check would
+        // misfire when a line was split mid-way.
         $response = '';
-        while ($line = fgets($this->socket, 515)) {
+        $finalLineSeen = false;
+        while (!$finalLineSeen && ($line = fgets($this->socket, 1024)) !== false) {
             $response .= $line;
-            if (substr($line, 3, 1) == ' ') {
-                break;
+            // We only know we have a complete logical line when the buffer
+            // ends with \n. If not, this was a partial read — keep going.
+            if (substr($line, -1) !== "\n") {
+                continue;
+            }
+            // Find the start of the last logical line in the buffer.
+            $trimmed = rtrim($response, "\r\n");
+            $lastNl = strrpos($trimmed, "\n");
+            $lastLine = $lastNl === false ? $trimmed : substr($trimmed, $lastNl + 1);
+            // Final line of an SMTP reply has a space at index 3 ("250 OK"),
+            // continuation lines have a hyphen ("250-EXTENSION").
+            if (strlen($lastLine) >= 4 && $lastLine[3] === ' ') {
+                $finalLineSeen = true;
             }
         }
-        
+
         $code = substr($response, 0, 3);
-        if ($code != $expectedCode) {
-            throw new Exception("SMTP Error: Expected $expectedCode, got $code - $response");
+        if ((string)$code !== (string)$expectedCode) {
+            throw new Exception("SMTP Error: Expected $expectedCode, got $code - " . trim($response));
         }
-        
+
         return $response;
     }
     
@@ -148,31 +212,48 @@ class SMTPMailer {
         return $headers;
     }
     
-    private function buildMessage($body, $attachments, $boundary) {
+    private function buildMessage($body, $attachments, $boundary, $encodedAttachments = null) {
         if (empty($attachments)) {
             return $body;
         }
-        
+
         $message = "--{$boundary}\r\n";
         $message .= "Content-Type: text/html; charset=UTF-8\r\n";
-        $message .= "Content-Transfer-Encoding: 7bit\r\n\r\n";
-        $message .= $body . "\r\n\r\n";
-        
-        // Add attachments
-        foreach ($attachments as $attachment) {
-            if (file_exists($attachment['path'])) {
+        $message .= "Content-Transfer-Encoding: base64\r\n\r\n";
+        $message .= chunk_split(base64_encode($body)) . "\r\n";
+
+        foreach ($attachments as $idx => $attachment) {
+            if (isset($encodedAttachments[$idx])) {
+                $content = $encodedAttachments[$idx];
+            } elseif (file_exists($attachment['path'])) {
                 $content = chunk_split(base64_encode(file_get_contents($attachment['path'])));
-                $message .= "--{$boundary}\r\n";
-                $message .= "Content-Type: application/octet-stream; name=\"{$attachment['name']}\"\r\n";
-                $message .= "Content-Transfer-Encoding: base64\r\n";
-                $message .= "Content-Disposition: attachment; filename=\"{$attachment['name']}\"\r\n\r\n";
-                $message .= $content . "\r\n";
+            } else {
+                continue;
+            }
+            $message .= "--{$boundary}\r\n";
+            $message .= "Content-Type: application/octet-stream; name=\"{$attachment['name']}\"\r\n";
+            $message .= "Content-Transfer-Encoding: base64\r\n";
+            $message .= "Content-Disposition: attachment; filename=\"{$attachment['name']}\"\r\n\r\n";
+            $message .= $content . "\r\n";
+        }
+
+        $message .= "--{$boundary}--";
+
+        return $message;
+    }
+
+    /**
+     * Pre-encode attachment file contents (base64) so a batch can reuse them
+     * across many sendOne() calls without re-reading the file each time.
+     */
+    public static function encodeAttachments($attachments) {
+        $out = [];
+        foreach ($attachments as $idx => $attachment) {
+            if (!empty($attachment['path']) && file_exists($attachment['path'])) {
+                $out[$idx] = chunk_split(base64_encode(file_get_contents($attachment['path'])));
             }
         }
-        
-        $message .= "--{$boundary}--";
-        
-        return $message;
+        return $out;
     }
     
     public function getError() {

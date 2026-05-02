@@ -119,8 +119,14 @@ function parseCSV($filePath) {
 /**
  * Import recipients to database
  */
-function importRecipients($recipients) {
+function importRecipients($recipients, $userId = null) {
     require_once __DIR__ . '/../config.php';
+    require_once __DIR__ . '/auth.php';
+    
+    // Get user ID from session if not provided
+    if ($userId === null) {
+        $userId = getCurrentUserId();
+    }
     
     $db = getDBConnection();
     $imported = 0;
@@ -128,8 +134,8 @@ function importRecipients($recipients) {
     $errors = [];
     
     $stmt = $db->prepare(
-        "INSERT INTO recipients (email, company_name, position) 
-         VALUES (?, ?, ?) 
+        "INSERT INTO recipients (user_id, email, company_name, position) 
+         VALUES (?, ?, ?, ?) 
          ON DUPLICATE KEY UPDATE 
          company_name = VALUES(company_name), 
          position = VALUES(position),
@@ -139,6 +145,7 @@ function importRecipients($recipients) {
     foreach ($recipients as $recipient) {
         try {
             $stmt->execute([
+                $userId,
                 $recipient['email'],
                 $recipient['company_name'],
                 $recipient['position']

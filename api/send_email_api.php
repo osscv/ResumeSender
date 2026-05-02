@@ -64,10 +64,19 @@ try {
     // Send email
     $result = sendEmailToRecipient($recipientId, $smtpConfigId, $subject, $body, $attachments);
     
+    // Get recipient email for response
+    $stmt = getDBConnection()->prepare("SELECT email, company_name FROM recipients WHERE id = ?");
+    $stmt->execute([$recipientId]);
+    $recipientInfo = $stmt->fetch();
+    $recipientEmail = $recipientInfo ? $recipientInfo['email'] : 'Unknown';
+    $recipientName = $recipientInfo ? $recipientInfo['company_name'] : '';
+    
     if ($result['success']) {
         jsonResponse([
             'success' => true,
-            'message' => 'Email sent successfully'
+            'message' => 'Sent to ' . $recipientEmail,
+            'email' => $recipientEmail,
+            'company' => $recipientName
         ]);
     } else {
         // Clean up uploaded attachments if email failed
@@ -79,7 +88,9 @@ try {
         
         jsonResponse([
             'success' => false,
-            'message' => 'Failed to send email: ' . $result['error']
+            'message' => 'Failed: ' . $recipientEmail . ' - ' . $result['error'],
+            'email' => $recipientEmail,
+            'company' => $recipientName
         ], 500);
     }
     
